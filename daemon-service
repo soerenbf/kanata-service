@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
+
 user=$(whoami)
 uid=$(id -u $user)
-
 dash_path=$(which dash)
-service_name='local.kanata'
-service_target="gui/$uid/$service_name"
-service_plist_path="$HOME/Library/LaunchAgents/$service_name.plist"
-stderr_log_path="/private/tmp/$service_name.err.log" && touch $stderr_log_path
-stdout_log_path="/private/tmp/$service_name.out.log" && touch $stdout_log_path
 
-kanata_sudoers='/private/etc/sudoers.d/kanata'
-is_service_installed=$([[ -f $service_plist_path && -f $kanata_sudoers ]] &> /dev/null; echo $?)
+service_name="Karabiner-VirtualHIDDevice-Daemon"
+service_id="local.$service_name"
+service_target="gui/$uid/$service_id"
+service_plist_path="$HOME/Library/LaunchAgents/$service_id.plist"
+service_stderr_log_path="/private/tmp/$service_id.err.log" && touch $service_stderr_log_path
+service_stdout_log_path="/private/tmp/$service_id.out.log" && touch $service_stdout_log_path
+service_sudoers_path="/private/etc/sudoers.d/$service_name"
+service_run_path="/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon"
+
+is_service_installed=$([[ -f $service_plist_path && -f $service_sudoers_path ]] &> /dev/null; echo $?)
 is_bootstrapped=$(launchctl print $service_target &> /dev/null; echo $?)
 
-# Plist template
+# Service plist template
 read -r -d '' plist_template <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,13 +30,11 @@ read -r -d '' plist_template <<'EOF'
         <string>{dash_path}</string>
     </dict>
     <key>Label</key>
-    <string>{service_name}</string>
+    <string>{service_id}</string>
     <key>ProgramArguments</key>
     <array>
         <string>sudo</string>
-        <string>{kanata_path}</string>
-        <string>--cfg</string>
-        <string>{config_path}</string>
+        <string>{service_run_path}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -58,33 +59,49 @@ EOF
 
 function install {
   if [[ is_service_installed -eq 0 ]]; then
-    echo "Kanata service is already installed."
+    echo "Service is already installed."
   else
-      # rs.kanata.plist launchd config
-      echo "${plist_template}" \
-        | sed "s~{dash_path}~$dash_path~g" \
-        | sed "s~{service_name}~$service_name~g" \
-        | sed "s~{kanata_path}~$kanata_binary~g" \
-        | sed "s~{config_path}~$kanata_config~g" \
-        | sed "s~{stderr_log_path}~$stderr_log_path~g" \
-        | sed "s~{stdout_log_path}~$stdout_log_path~g" \
-        1> ./$service_name.plist.tmp
-      sudo chmod 644 ./$service_name.plist.tmp
-      sudo cp -vp ./$service_name.plist.tmp $service_plist_path && rm -f ./$service_name.plist.tmp
+    # create plist files for launchd config
+    echo "${plist_template}" \
+    | sed \
+        -e "s~{dash_path}~$dash_path~g" \
+        -e "s~{user}~$user~g" \
+        -e "s~{service_id}~$service_id~g" \
+        -e "s~{service_run_path}~$service_run_path~g" \
+        -e "s~{stderr_log_path}~$service_stderr_log_path~g" \
+        -e "s~{stdout_log_path}~$service_stdout_log_path~g" \
+    1> ./$service_id.plist.tmp
 
-      # kanata file in sudoers.d
-      echo "$user ALL=(root) NOPASSWD: sha256:$(shasum -a 256 $kanata_binary) --cfg $kanata_config" 1> ./kanata.tmp
-      sudo chown root:wheel ./kanata.tmp
-      sudo chmod 600 ./kanata.tmp
-      sudo cp -vp ./kanata.tmp $kanata_sudoers && rm -rf ./kanata.tmp
+    # verify plist file and install if valid
+    if plutil -lint ./$service_id.plist.tmp; then
+      sudo chmod 644 ./$service_id.plist.tmp
+      sudo cp -vp ./$service_id.plist.tmp $service_plist_path && rm -f ./$service_id.plist.tmp
+    else
+      echo "Plist file is not valid. Exiting..."
+      rm -f ./$service_id.plist.tmp
+      exit 1
+    fi
 
-      printf "\n"
-      echo "Installed service."
+    # setup sudoers.d
+    histchars=
+    shasum=$(shasum -a 256 "$service_run_path" | awk '{ print $1 }')
+    run_path_without_spaces=$(echo $service_run_path | sed -e 's/ /\\ /g')
+    printf "$user ALL=(root) NOPASSWD: sha256:$shasum $run_path_without_spaces\n" \
+      1> ./$service_name.tmp
+    unset histchars
+
+    sudo chown root:wheel ./$service_name.tmp
+    sudo chmod 600 ./$service_name.tmp
+    sudo cp -vp ./$service_name.tmp $service_sudoers_path && rm -rf ./$service_name.tmp
+
+    printf "\n"
+    echo "Installed service."
   fi
 }
 
 clear-logs () {
-  [[ -f $stderr_log_path ]] && truncate -s 0 $stderr_log_path
+  [[ -f $service_stderr_log_path ]] && truncate -s 0 $service_stderr_log_path
+  [[ -f $service_stdout_log_path ]] && truncate -s 0 $service_stdout_log_path
 }
 
 function start {
@@ -96,7 +113,7 @@ function start {
       launchctl kickstart $service_target
     else
       launchctl enable $service_target
-      launchctl bootstrap gui/$uid $service_plist_path && echo "Kanata service starting..."
+      launchctl bootstrap gui/$uid $service_plist_path && echo "Service is starting..."
       sleep 2
       echo "Started."
     fi
@@ -125,7 +142,7 @@ function restart {
   else
     if [[ is_bootstrapped -eq 0 ]]; then
       clear-logs
-      launchctl kickstart -k gui/$uid/$service_name && echo "Service restarting..."
+      launchctl kickstart -k gui/$uid/$service_id && echo "Service restarting..."
     else
       stop
       start
@@ -135,7 +152,7 @@ function restart {
 
 function debug {
   if [[ is_service_installed -eq 0 ]]; then
-    tail -n 50 -f $stderr_log_path
+    tail -n 50 -f $service_stderr_log_path
   else
     echo "Service isn't installed."
   fi
@@ -164,7 +181,7 @@ function uninstall {
     stop
     echo "Deleting..."
     sudo rm -vf $service_plist_path
-    sudo rm -vf $kanata_sudoers
+    sudo rm -vf $service_sudoers_path
     clear-logs
     printf "\n"
     echo "Uninstalled service"
@@ -173,16 +190,16 @@ function uninstall {
 
 function help {
   echo "Usage:
-    Installation: kanata-service install <kanata_binary> <kanata_config>
-    Other: kanata-service <command>
+    Installation: daemon-service install <service_run_path>
+    Other: daemon-service <command>
 
 Available commands:
-    1. install - installs the launchd com.kanata.plist file & and adds kanata to sudoers.d
-    2. uninstall - deletes the launchd com.kanata.plist file & removes the kanata sudoers.d
+    1. install - installs the launchd plist file & and adds execution permission to sudoers.d
+    2. uninstall - deletes the launchd plist file & removes the permissions from sudoers.d
     3. start - starts the service
     4. stop - stops the service
     5. restart - restarts the service
-    6. info - prints properties of the com.kanata launchd service
+    6. info - prints properties of the launchd service
     7. debug - concatenates the stderr.log to stdout"
 }
 
@@ -197,16 +214,7 @@ main () {
     0)
       help ;;
     1)
-      [[ "$1" != "install" ]] && $1 || invalid-syntax ;;
-    3)
-      if [[ "$1" == "install" ]]; then
-        kanata_binary=$(realpath $2)
-        kanata_config=$(realpath $3)
-        $1
-      else
-        invalid-syntax
-      fi
-      ;;
+      $1 || invalid-syntax ;;
     *)
       invalid-syntax ;;
   esac
