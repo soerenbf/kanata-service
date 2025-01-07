@@ -190,7 +190,7 @@ function uninstall {
 
 function help {
   echo "Usage:
-    Installation: daemon-service install <service_run_path>
+    Installation: daemon-service install
     Other: daemon-service <command>
 
 Available commands:
